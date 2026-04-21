@@ -57,7 +57,7 @@ npx expo prebuild
 npx expo run:android   # or run:ios
 ```
 
-You'll need the backend running locally — it lives at [github.com/jgsjoel/circle-go](https://github.com/jgsjoel/circle-go). The API base URL is set in `src/api/client.ts` and the WebSocket URL in `src/services/websocket.ts` — both point to `192.168.1.5:8080` by default, change these to match your setup.
+To get the backend running locally check -> [github.com/jgsjoel/circle-go](https://github.com/jgsjoel/circle-go). 
 
 ## What's still being worked on
 
