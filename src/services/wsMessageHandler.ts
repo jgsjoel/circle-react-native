@@ -11,6 +11,7 @@ import { chatRepository } from './chatRepository';
 class WsMessageHandler {
   /** Called after each processed offset so the WS service can track replay position. */
   onOffsetReceived: ((offset: string) => void) | null = null;
+  private processedOffsets = new Set<string>();
 
   handle(raw: string): void {
     console.log('[WSHandler] ← RAW incoming:', raw);
@@ -21,6 +22,16 @@ class WsMessageHandler {
     } catch (e) {
       console.log('[WSHandler] Failed to decode message:', e);
       return;
+    }
+
+    // Prevent duplicate processing of same message
+    const offset = (envelope['offset'] as string | undefined) ?? '';
+    if (offset && this.processedOffsets.has(offset)) {
+      console.log('[WSHandler] Skipping duplicate message, offset:', offset);
+      return;
+    }
+    if (offset) {
+      this.processedOffsets.add(offset);
     }
 
     const messageType = (envelope['message_type'] as string | undefined) ?? '';

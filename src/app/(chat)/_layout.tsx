@@ -2,6 +2,7 @@ import { Stack } from "expo-router";
 
 export default function ChatLayout() {
   return (
+    
     <Stack
       screenOptions={{
         // Hide the header for all screens in (auth) for a custom look

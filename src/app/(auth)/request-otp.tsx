@@ -13,7 +13,7 @@ export default function RequestOtpScreen() {
     const [loading, setLoading] = useState(false);
 
     const handleSendOtp = async () => {
-        const fullMobile = `+94${mobile.replace(/\s/g, '')}`;
+        const fullMobile = `${mobile.replace(/\s/g, '')}`;
 
         if (!name.trim()) {
             Alert.alert('Error', 'Please enter your name.');

@@ -1,7 +1,11 @@
 import { create } from 'zustand';
-import * as SecureStore from 'expo-secure-store';
-import { wsService } from '../services/websocket';
-import { chatRepository, type ChatMessageRow, type ChatRow } from '../services/chatRepository';
+import {
+  initializeChatSession,
+  sendTextMessage,
+  sendMediaMessage,
+  handleMessageStatusUpdate,
+  type OpenChatParams,
+} from '../services/chatService';
 
 // ─── Public types ────────────────────────────────────────────────────────────
 
@@ -25,35 +29,37 @@ export interface ChatSession {
   recipientMobile: string;
 }
 
+export interface SelectedMedia {
+  uri: string;
+  type: 'photo' | 'video' | 'file';
+  filename?: string;
+  duration?: number; // for videos in seconds
+  mimeType?: string;
+}
+
 // ─── Store shape ─────────────────────────────────────────────────────────────
+
+interface UploadingMessage {
+  locMsgId: number;
+  progress: number; // 0-100
+}
 
 interface ChatStoreState {
   session: ChatSession | null;
   messages: ChatMessage[];
   draft: string;
   isLoading: boolean;
+  selectedMedia: SelectedMedia[];
+  uploadingMessages: Map<number, UploadingMessage>;
 
-  /**
-   * Initialize a chat session: resolve / create the DB chat, load persisted
-   * messages, and set the active session so incoming WS messages are routed
-   * to the correct conversation.
-   */
-  openChat: (params: {
-    recipientPublicId: string;
-    recipientName: string;
-    recipientMobile: string;
-    privateChatId?: number;
-    pubChatId?: string;
-  }) => Promise<void>;
-
+  // ── State Management Actions ────────────────────────────────────────────
+  openChat: (params: OpenChatParams) => Promise<void>;
   closeChat: () => void;
   setDraft: (text: string) => void;
-
-  /**
-   * Persist the current draft to DB, send via WebSocket, and optimistically
-   * add the message to the in-memory list.
-   */
+  addSelectedMedia: (media: SelectedMedia[]) => void;
+  clearSelectedMedia: () => void;
   sendTextMessage: () => Promise<void>;
+  sendMediaMessage: () => Promise<void>;
 
   // ── Called by wsMessageHandler ──────────────────────────────────────────
   _onMessageStatus: (params: {
@@ -65,22 +71,6 @@ interface ChatStoreState {
   _onIncomingMessage: (msg: ChatMessage) => void;
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-function mapRow(row: ChatMessageRow): ChatMessage {
-  return {
-    id: row.id,
-    chatId: row.chatId,
-    text: row.text ?? '',
-    fromMe: row.senderId === 0,
-    status: row.status ?? 'pending',
-    pubMsgId: row.pubMsgId ?? '',
-    msgType: row.msgType ?? 'text',
-    mediaUrls: row.mediaUrls ?? '',
-    createdAt: row.createdAt,
-  };
-}
-
 // ─── Store ───────────────────────────────────────────────────────────────────
 
 export const useChatStore = create<ChatStoreState>((set, get) => ({
@@ -88,122 +78,104 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
   messages: [],
   draft: '',
   isLoading: false,
+  selectedMedia: [],
+  uploadingMessages: new Map(),
 
-  openChat: async ({ recipientPublicId, recipientName, recipientMobile, privateChatId, pubChatId }) => {
+  // ── Open Chat Session ──────────────────────────────────────────────────
+  openChat: async (params) => {
     set({ isLoading: true, messages: [], draft: '' });
 
     try {
-      // 1. Resolve or create the contact in the DB
-      let contactId = await chatRepository.getContactIdByPublicId(recipientPublicId);
-      if (contactId === null) {
-        contactId = await chatRepository.getOrCreateContactByPublicId(
-          recipientPublicId,
-          recipientName,
-          recipientMobile,
-        );
-      }
-
-      // 2. Resolve or create the chat
-      let chat: ChatRow;
-      if (privateChatId && privateChatId > 0) {
-        chat =
-          (await chatRepository.getChatById(privateChatId)) ??
-          (await chatRepository.getOrCreateSingleChat(contactId, recipientName));
-      } else {
-        chat = await chatRepository.getOrCreateSingleChat(contactId, recipientName);
-      }
-
-      // 3. Prefer pubChatId from the navigator param if the DB row is still empty
-      const resolvedPubChatId = pubChatId || chat.pubChatId || '';
-
-      const session: ChatSession = {
-        chatId: chat.id,
-        pubChatId: resolvedPubChatId,
-        recipientPublicId,
-        recipientName,
-        recipientMobile,
-      };
-
-      // 4. Load persisted messages
-      const rows = await chatRepository.getMessagesForChat(chat.id);
-
-      set({ session, messages: rows.map(mapRow), isLoading: false });
+      const { session, messages } = await initializeChatSession(params);
+      set({ session, messages, isLoading: false });
     } catch (e) {
       console.error('[ChatStore] openChat error:', e);
       set({ isLoading: false });
     }
   },
 
-  closeChat: () => set({ session: null, messages: [], draft: '' }),
-
   setDraft: (text) => set({ draft: text }),
 
+  addSelectedMedia: (media) => set((state) => ({ selectedMedia: [...state.selectedMedia, ...media] })),
+
+  clearSelectedMedia: () => set({ selectedMedia: [] }),
+
+  // ── Send Text Message ─────────────────────────────────────────────────
   sendTextMessage: async () => {
     const { session, draft } = get();
-    if (!session || !draft.trim()) return;
+    if (!session || draft.trim().length === 0) return;
 
-    const text = draft.trim();
+    const caption = draft.trim();
     set({ draft: '' });
 
-    // Read current user credentials
-    const myPublicId = (await SecureStore.getItemAsync('user_id')) ?? '';
-    const myMobile = (await SecureStore.getItemAsync('mobile')) ?? '';
-
-    // Persist the outgoing message first (status: pending)
-    let locMsgId = 0;
     try {
-      const saved = await chatRepository.saveMessage({
-        chatId: session.chatId,
-        text,
-        senderId: 0, // 0 = current user
-        msgType: 'text',
-        status: 'pending',
-      });
-      locMsgId = saved.id;
-
-      // Optimistically add to UI
-      set((state) => ({ messages: [...state.messages, mapRow(saved)] }));
+      const { locMsgId, message } = await sendTextMessage(session, caption);
+      set((state) => ({ messages: [...state.messages, message] }));
     } catch (e) {
-      console.error('[ChatStore] saveMessage error:', e);
+      console.error('[ChatStore] sendTextMessage error:', e);
+      // Restore draft on error
+      set({ draft: caption });
     }
-
-    // Build and send the WebSocket payload — matches the Flutter format exactly
-    const payload = {
-      message_type: 'message',
-      body: {
-        from: myPublicId,
-        to: session.recipientPublicId,
-        pub_chat_id: session.pubChatId,
-        private_chat_id: session.chatId.toString(),
-        loc_msg_id: locMsgId.toString(),
-        content: {
-          message: text,
-          sender_mobile: myMobile,
-          timestamp: new Date().toISOString(),
-          attachments: [],
-        },
-      },
-    };
-
-    console.log('[ChatStore] Sending message payload:', payload);
-    wsService.send(payload);
   },
 
-  // ── WS callbacks (called from wsMessageHandler) ──────────────────────────
+  // ── Send Media Message ────────────────────────────────────────────────
+  sendMediaMessage: async () => {
+    const { session, draft, selectedMedia } = get();
+    if (!session || selectedMedia.length === 0) return;
 
-  _onMessageStatus: ({ locMsgId, pubMsgId, pubChatId, status }) => {
-    // Update the DB row (fire-and-forget; UI is authoritative for the session)
-    chatRepository
-      .updateMessageStatus({ locMsgId, pubMsgId, pubChatId, status, skipChatIdIfSet: true })
-      .catch(console.error);
+    const caption = draft.trim();
+    const mediaToSend = [...selectedMedia];
 
-    // Propagate pubChatId to the active session if not yet set
+    set({ draft: '', selectedMedia: [] });
+
+    try {
+      const { locMsgId, message } = await sendMediaMessage(session, mediaToSend, caption, (progress) => {
+        set((state) => {
+          const updated = new Map(state.uploadingMessages);
+          if (progress === 100) {
+            updated.delete(locMsgId);
+          } else {
+            updated.set(locMsgId, { locMsgId, progress });
+          }
+          return { uploadingMessages: updated };
+        });
+      });
+
+      set((state) => ({ messages: [...state.messages, message] }));
+    } catch (e) {
+      console.error('[ChatStore] sendMediaMessage error:', e);
+      // Restore state on error
+      set({ draft: caption, selectedMedia: mediaToSend });
+    }
+  },
+
+  // ── Close Chat Session ────────────────────────────────────────────────
+  closeChat: () => set({
+    session: null,
+    messages: [],
+    draft: '',
+    selectedMedia: [],
+    uploadingMessages: new Map(),
+  }),
+
+  // ── WebSocket Callbacks ────────────────────────────────────────────────
+  _onMessageStatus: async ({ locMsgId, pubMsgId, pubChatId, status }) => {
     const { session } = get();
-    if (session && pubChatId && !session.pubChatId) {
-      set({ session: { ...session, pubChatId } });
+
+    // Persist status change to DB and get any pubChatId sync needs
+    const { pubChatIdToSync } = await handleMessageStatusUpdate({
+      locMsgId,
+      pubMsgId,
+      pubChatId,
+      status,
+    });
+
+    // Propagate pubChatId to the active session if needed
+    if (session && pubChatIdToSync && !session.pubChatId) {
+      set({ session: { ...session, pubChatId: pubChatIdToSync } });
     }
 
-    // Update status on the in-memory message
+    // Update message status in state
     set((state) => ({
       messages: state.messages.map((m) =>
         m.id === locMsgId

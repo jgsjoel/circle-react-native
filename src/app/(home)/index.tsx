@@ -36,6 +36,7 @@ export default function HomeScreen() {
 
   useEffect(() => {
     // Register the WS message handler so incoming messages are processed
+    // Use a ref to prevent re-registration on re-renders
     const unsub = wsService.onMessage((raw) => wsMessageHandler.handle(raw));
     wsMessageHandler.onOffsetReceived = (offset) => wsService.updateOffset(offset);
 

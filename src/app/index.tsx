@@ -6,10 +6,12 @@ import { StatusBar } from 'expo-status-bar';
 import * as SecureStore from 'expo-secure-store';
 import api from '../api/client';
 import { initDb } from '../db/client';
+import { useConnectivity } from '../hooks/useConnectivity';
 
 export default function Index() {
   const router = useRouter();
   const [checking, setChecking] = useState(true);
+  const isOnline = useConnectivity();
 
   useEffect(() => {
     (async () => {
@@ -20,6 +22,16 @@ export default function Index() {
           return;
         }
 
+        // If offline but token exists, allow access to home
+        if (!isOnline) {
+          console.log('[Auth] Offline mode — allowing access with existing token');
+          const userId = await SecureStore.getItemAsync('user_id');
+          if (userId) initDb(userId);
+          router.replace('/(home)');
+          return;
+        }
+
+        // Online — validate token with server
         const res = await api.post('/auth/validate-token', { token });
         if (res.data?.valid) {
           // Init user-scoped DB for returning user
@@ -38,13 +50,22 @@ export default function Index() {
           router.replace('/(auth)/landing');
         }
       } catch {
-        // Network error or server down — go to landing
-        router.replace('/(auth)/landing');
+        // Network error or server down — if token exists, allow offline access
+        const token = await SecureStore.getItemAsync('token');
+        if (token && !isOnline) {
+          console.log('[Auth] Network error — allowing offline access with existing token');
+          const userId = await SecureStore.getItemAsync('user_id');
+          if (userId) initDb(userId);
+          router.replace('/(home)');
+        } else {
+          // No token or online error — go to landing
+          router.replace('/(auth)/landing');
+        }
       } finally {
         setChecking(false);
       }
     })();
-  }, []);
+  }, [isOnline]);
 
   return (
     <View className="flex-1 bg-black justify-center items-center">

@@ -17,6 +17,7 @@ class WebSocketService {
   private offset = '';
   private unsubConnectivity: (() => void) | null = null;
   private messageHandlers = new Set<MessageHandler>();
+  private connectionId = 0; // Track unique connection IDs
 
   constructor() {
     this.unsubConnectivity = onConnectivityChange((online) => {
@@ -78,29 +79,31 @@ class WebSocketService {
     this.closeSocket();
 
     try {
+      this.connectionId++;
+      const connId = this.connectionId;
       const url = `${WS_BASE_URL}?token=${encodeURIComponent(token)}&offset=${encodeURIComponent(this.offset)}`;
-      console.log('[WebSocketService] Connecting...');
+      console.log(`[WebSocketService] Connecting... (connection #${connId})`);
 
       this.socket = new WebSocket(url);
 
       this.socket.onopen = () => {
         this.reconnectAttempts = 0;
-        console.log('[WebSocketService] Connected');
+        console.log(`[WebSocketService] Connected (connection #${connId})`);
       };
 
       this.socket.onmessage = (event) => {
         const data = typeof event.data === 'string' ? event.data : '';
-        console.log('[WebSocketService] Received:', data);
+        console.log(`[WebSocketService] Received (connection #${connId}):`, data);
         this.messageHandlers.forEach((h) => h(data));
       };
 
       this.socket.onerror = (event) => {
-        console.log('[WebSocketService] Error:', event);
+        console.log(`[WebSocketService] Error (connection #${connId}):`, event);
         this.scheduleReconnect(token);
       };
 
       this.socket.onclose = (event) => {
-        console.log(`[WebSocketService] Closed (code: ${event.code}, reason: ${event.reason})`);
+        console.log(`[WebSocketService] Closed (connection #${connId}, code: ${event.code}, reason: ${event.reason})`);
         this.scheduleReconnect(token);
       };
     } catch (e) {

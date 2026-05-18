@@ -39,5 +39,6 @@ yarn-error.*
 # TypeScript
 *.tsbuildinfo
 
-# Project-specific: personal prompt notes
+# Project-specific: personal prompt notes and reference files
 prompts.txt
+chat-feature flutter/
